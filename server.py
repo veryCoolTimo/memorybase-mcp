@@ -2,15 +2,13 @@
 """
 MemoryBase MCP Server
 
-MCP server that collects insights from Claude sessions and sends notifications to Telegram.
-When Claude completes a significant task (feature, bugfix, plan), it calls log_insight tool.
+MCP server that sends insights to the server API.
+The server then sends Telegram notification with confirmation buttons.
 """
 
 import os
-import json
 import asyncio
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from mcp.server import Server
@@ -22,70 +20,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Config from environment
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-INSIGHTS_FILE = os.getenv("INSIGHTS_FILE", "insights.json")
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8585")
+API_SECRET = os.getenv("API_SECRET", "")
 
 # MCP Server instance
 server = Server("memorybase-mcp")
-
-
-def load_insights() -> list:
-    """Load insights from file."""
-    path = Path(INSIGHTS_FILE)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return []
-
-
-def save_insights(insights: list):
-    """Save insights to file."""
-    Path(INSIGHTS_FILE).write_text(
-        json.dumps(insights, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-
-async def send_telegram_notification(insight: dict) -> bool:
-    """Send notification to Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-
-    type_emoji = {
-        "feature": "NEW",
-        "bugfix": "FIX",
-        "plan": "PLAN",
-        "idea": "IDEA",
-        "decision": "DECISION",
-        "learning": "LEARN",
-    }
-
-    emoji = type_emoji.get(insight.get("type", ""), "INFO")
-
-    message = f"""[{emoji}] {insight.get('type', 'unknown').upper()}
-
-Project: {insight.get('project', 'unknown')}
-Summary: {insight.get('summary', 'No summary')}
-
-{insight.get('description', '')}
-
----
-{insight.get('timestamp', '')}"""
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": message,
-                    "parse_mode": "HTML",
-                },
-                timeout=10.0,
-            )
-            return response.status_code == 200
-    except Exception:
-        return False
 
 
 @server.list_tools()
@@ -103,7 +42,8 @@ Call this tool after:
 - Making an important architectural decision
 - Learning something valuable
 
-This sends a notification to the user's Telegram.""",
+This sends a request to the server which notifies the user via Telegram.
+The user can confirm, edit, or reject the insight.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -132,34 +72,6 @@ This sends a notification to the user's Telegram.""",
                 },
                 "required": ["type", "project", "summary"]
             }
-        ),
-        Tool(
-            name="get_pending_insights",
-            description="Get list of pending insights that haven't been processed yet.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max number of insights to return",
-                        "default": 10
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="mark_insight_processed",
-            description="Mark an insight as processed (added to memoryBase).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "insight_id": {
-                        "type": "string",
-                        "description": "ID of the insight to mark as processed"
-                    }
-                },
-                "required": ["insight_id"]
-            }
         )
     ]
 
@@ -169,59 +81,54 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Handle tool calls."""
 
     if name == "log_insight":
-        # Create insight record
-        insight = {
-            "id": datetime.now().strftime("%Y%m%d%H%M%S"),
-            "timestamp": datetime.now().isoformat(),
+        # Create insight payload
+        payload = {
             "type": arguments.get("type"),
             "project": arguments.get("project"),
             "summary": arguments.get("summary"),
             "description": arguments.get("description", ""),
             "files_changed": arguments.get("files_changed", []),
-            "processed": False
         }
 
-        # Save to file
-        insights = load_insights()
-        insights.append(insight)
-        save_insights(insights)
+        # Send to server API
+        headers = {}
+        if API_SECRET:
+            headers["Authorization"] = f"Bearer {API_SECRET}"
 
-        # Send Telegram notification
-        tg_sent = await send_telegram_notification(insight)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{SERVER_URL}/api/insight",
+                    json=payload,
+                    headers=headers,
+                    timeout=30.0,
+                )
 
-        result = f"Insight logged: {insight['summary']}"
-        if tg_sent:
-            result += "\nTelegram notification sent."
-        else:
-            result += "\nTelegram notification failed (check config)."
+                if response.status_code == 200:
+                    data = response.json()
+                    return [TextContent(
+                        type="text",
+                        text=f"Insight sent to server. ID: {data.get('id', 'unknown')}\n"
+                             f"Telegram notification sent. Waiting for user confirmation."
+                    )]
+                else:
+                    error = response.json().get("error", "Unknown error")
+                    return [TextContent(
+                        type="text",
+                        text=f"Failed to send insight: {error}"
+                    )]
 
-        return [TextContent(type="text", text=result)]
-
-    elif name == "get_pending_insights":
-        limit = arguments.get("limit", 10)
-        insights = load_insights()
-        pending = [i for i in insights if not i.get("processed", False)][:limit]
-
-        if not pending:
-            return [TextContent(type="text", text="No pending insights.")]
-
-        result = f"Found {len(pending)} pending insights:\n\n"
-        for i in pending:
-            result += f"- [{i['id']}] {i['type']}: {i['summary']} ({i['project']})\n"
-
-        return [TextContent(type="text", text=result)]
-
-    elif name == "mark_insight_processed":
-        insight_id = arguments.get("insight_id")
-        insights = load_insights()
-
-        for i in insights:
-            if i["id"] == insight_id:
-                i["processed"] = True
-                save_insights(insights)
-                return [TextContent(type="text", text=f"Insight {insight_id} marked as processed.")]
-
-        return [TextContent(type="text", text=f"Insight {insight_id} not found.")]
+        except httpx.ConnectError:
+            return [TextContent(
+                type="text",
+                text=f"Failed to connect to server at {SERVER_URL}. "
+                     f"Make sure the server is running."
+            )]
+        except Exception as e:
+            return [TextContent(
+                type="text",
+                text=f"Error sending insight: {str(e)}"
+            )]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

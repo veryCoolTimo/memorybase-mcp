@@ -1,21 +1,34 @@
 # MemoryBase MCP Server
 
-MCP server that collects insights from Claude sessions and sends notifications to Telegram.
+MCP server that sends insights from Claude sessions to your server.
 
 ## How it works
 
 1. You add this MCP server to Claude Code / Claude Desktop
-2. When Claude completes significant tasks, it automatically calls `log_insight`
-3. You receive a Telegram notification
-4. Insights are saved and can be processed later
+2. When Claude completes significant tasks, it calls `log_insight`
+3. MCP sends HTTP request to your server (tg-bot)
+4. Server sends Telegram notification with [Да] [Изменить] [Нет] buttons
+5. You confirm → insight is analyzed and saved to memoryBase
+
+## Architecture
+
+```
+Claude (any session)
+    ↓
+MCP (log_insight)
+    ↓ HTTP POST
+Server (tg-bot)
+    ↓
+Telegram notification
+    ↓
+User confirms → saves to memoryBase
+```
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
 | `log_insight` | Log an insight (feature, bugfix, plan, idea, decision, learning) |
-| `get_pending_insights` | Get list of unprocessed insights |
-| `mark_insight_processed` | Mark insight as processed |
 
 ## Triggers
 
@@ -51,8 +64,8 @@ nano .env
 ```
 
 Fill in:
-- `TELEGRAM_BOT_TOKEN` - Your Telegram bot token
-- `TELEGRAM_CHAT_ID` - Your Telegram user ID
+- `SERVER_URL` - URL of your server with tg-bot (e.g., `http://your-server:8585`)
+- `API_SECRET` - Secret key (must match tg-bot's API_SECRET)
 
 ### 4. Add to Claude Code
 
@@ -65,8 +78,8 @@ Edit `~/.claude/claude_desktop_config.json`:
       "command": "/path/to/memorybase-mcp/venv/bin/python",
       "args": ["/path/to/memorybase-mcp/server.py"],
       "env": {
-        "TELEGRAM_BOT_TOKEN": "your_token",
-        "TELEGRAM_CHAT_ID": "your_id"
+        "SERVER_URL": "http://your-server:8585",
+        "API_SECRET": "your_secret"
       }
     }
   }
@@ -82,8 +95,8 @@ Or for Claude Code CLI, add to your project's `.mcp.json`:
       "command": "python",
       "args": ["./tools/memorybase-mcp/server.py"],
       "env": {
-        "TELEGRAM_BOT_TOKEN": "your_token",
-        "TELEGRAM_CHAT_ID": "your_id"
+        "SERVER_URL": "http://your-server:8585",
+        "API_SECRET": "your_secret"
       }
     }
   }
@@ -96,20 +109,6 @@ Once configured, Claude will automatically log insights. You can also explicitly
 
 ```
 "Log this as a feature insight for project X"
-```
-
-## Telegram Notification Format
-
-```
-[FEATURE] feature
-
-Project: timo-rpg
-Summary: Added DM mode with real-time sync
-
-Implemented virtual tabletop with fog of war...
-
----
-2025-12-27T22:00:00
 ```
 
 ## License
